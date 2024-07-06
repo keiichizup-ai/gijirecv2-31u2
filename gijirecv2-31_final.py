@@ -9,7 +9,8 @@ from dotenv import load_dotenv
 
 # APIキーの設定
 load_dotenv()  # .env ファイルを読み込む
-openai.api_key = os.environ.get('OPENAI_API_KEY')
+#openai.api_key = os.environ.get('OPENAI_API_KEY')
+openai.api_key = os.getenv('OPENAI_API_KEY')
 
 def transcribe_audio(file, format):
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
