@@ -1,0 +1,148 @@
+import streamlit as st
+import openai
+import tempfile
+import os
+from pydub import AudioSegment
+from googletrans import Translator
+from langdetect import detect
+from dotenv import load_dotenv
+import re  # re モジュールをインポート
+
+# APIキーの設定
+load_dotenv()  
+openai.api_key = os.getenv('OPENAI_API_KEY')
+
+def transcribe_audio(file, format):
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
+        if format == "mp3":
+            sound = AudioSegment.from_mp3(file)
+            sound.export(temp_file.name, format="wav")
+        else:
+            temp_file.write(file.getvalue())
+        temp_file_path = temp_file.name
+
+    with open(temp_file_path, "rb") as audio_file:
+        transcript = openai.Audio.transcribe(
+            model="whisper-1",
+            file=audio_file
+        )
+    return transcript['text']
+
+def summarize_text(text, description, lang):
+    max_tokens = 150 if description == "エグゼクティブサマリ" else 450 if description == "3行サマリ" else 1500
+
+    if description == "エグゼクティブサマリ":
+        prompt_text = f"以下の文章を1行の{description}として要約してください。" if lang == 'ja' else f"Please summarize the following text in one line as an {description}:"
+    elif description == "3行サマリ":
+        prompt_text = f"以下の文章を3つの箇条書きで{description}として要約してください。" if lang == 'ja' else f"Please summarize the following text in 3 bullet points as a {description}:"
+    else:
+        prompt_text = f"以下の文章を{description}として要約してください。" if lang == 'ja' else f"Please summarize the following text as a {description}:"
+
+    summary = openai.ChatCompletion.create(
+        model="gpt-4",
+        messages=[
+            {"role": "system", "content": prompt_text},
+            {"role": "user", "content": text}
+        ],
+        max_tokens=max_tokens,
+        temperature=0.7
+    )
+    summary_text = summary['choices'][0]['message']['content']
+
+    if description == "エグゼクティブサマリ":
+        if lang == 'ja' and len(summary_text) > 140:
+            summary_text = summary_text[:140] + "..."
+        elif lang == 'en' and len(summary_text) > 280:
+            summary_text = summary_text[:280] + "..."
+
+    return summary_text
+
+def translate_text(text, is_summary=False):
+    translator = Translator()
+    dest_language = 'ja' if detect(text) == 'en' else 'en'
+    translation = translator.translate(text, dest=dest_language)
+
+    # 3行サマリの場合、箇条書きの形式を変換
+    if is_summary:
+        if dest_language == 'en':
+            # 英語への翻訳時は、日本語の箇条書き記号（- 、・）と全角スペースを「- 」に、読点「、」を「,」に変換
+            translation.text = translation.text.replace('・', '-').replace('、', ',')
+            # 不要なハイフンを削除
+            translation.text = re.sub(r'-{2,}', '-', translation.text)
+            translation.text = translation.text.replace('- ', '- ')
+        else:
+            # 日本語への翻訳時は、英語の箇条書き記号（-）とスペースを「・」に、コンマ「,」を「、」に変換
+            translation.text = translation.text.replace('- ', '・').replace(',', '、')
+        # 翻訳後のテキストから行頭の不要なハイフンを削除
+        translation.text = re.sub(r'^- ', '', translation.text, flags=re.MULTILINE)
+
+    return translation.text
+
+def punctuate_and_paragraph(text):
+    prompt = f"""以下の文章に句読点と段落を追加して、読みやすく整形してください。
+
+    {text}
+    """
+    response = openai.ChatCompletion.create(
+        model="gpt-4",
+        messages=[
+            {"role": "system", "content": prompt},
+        ],
+        max_tokens=2000,
+        temperature=0.5
+    )
+    return response['choices'][0]['message']['content']
+
+def main():
+    st.title('議事Rec Ver.2.32')
+    uploaded_file = st.file_uploader("音声ファイルをアップロードしてください (.wav, .mp3)", type=["wav", "mp3"])
+
+    if uploaded_file is not None:
+        full_transcription = st.checkbox('全文文字起こし')
+        executive_summary = st.checkbox('エグゼクティブサマリ')
+        three_line_summary = st.checkbox('3行サマリ')
+        extended_summary = st.checkbox('長めのサマリ')
+
+        if st.button('実行'):
+            with st.spinner('音声をテキストに変換中...'):
+                transcript = transcribe_audio(uploaded_file, uploaded_file.type.split('/')[1])
+                st.session_state.original_text = transcript
+                st.session_state.translated_text = translate_text(transcript)
+                display_text = ""
+
+                if full_transcription:
+                    punctuated_transcript = punctuate_and_paragraph(transcript)
+                    display_text += "**Full Transcription:**\n" + punctuated_transcript + "\n\n"
+
+                if executive_summary:
+                    summary_text = summarize_text(transcript, "エグゼクティブサマリ", detect(transcript))
+                    st.session_state.summary_text = summary_text
+                    display_text += "**エグゼクティブサマリ:**\n" + summary_text + "\n\n"
+
+                if three_line_summary:
+                    summary_text = summarize_text(transcript, "3行サマリ", detect(transcript))
+                    st.session_state.summary_text = summary_text
+                    # 2行目以降の行頭の不要な文字を削除
+                    summary_text = re.sub(r'^\s*[-・⚪︎●■]\s*', '- ', summary_text, flags=re.MULTILINE)
+                    display_text += "**3行サマリ:**\n" + summary_text + "\n\n"
+
+                if extended_summary:
+                    summary_text = summarize_text(transcript, "長めのサマリ", detect(transcript))
+                    st.session_state.summary_text = summary_text
+                    display_text += "**長めのサマリ:**\n" + summary_text + "\n\n"
+
+                st.markdown(display_text)
+
+        if st.button('日本語/English'):
+            if 'original_text' in st.session_state:
+                st.session_state.translated_text = translate_text(st.session_state.original_text)
+                st.markdown("**Translated Full Text:**\n" + st.session_state.translated_text)
+            if 'summary_text' in st.session_state:
+                translated_summary = translate_text(st.session_state.summary_text, is_summary=True)  # 3行サマリとして翻訳
+                st.markdown("**Translated Summary:**\n" + translated_summary)
+
+if __name__ == "__main__":
+    main()
+
+
+
